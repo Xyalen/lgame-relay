@@ -13,9 +13,9 @@ import json
 import random
 import string
 import websockets
-from websockets.server import WebSocketServerProtocol
+from websockets.asyncio.server import serve
 
-rooms: dict[str, list[WebSocketServerProtocol]] = {}
+rooms: dict[str, list] = {}
 
 def make_code() -> str:
     while True:
@@ -23,12 +23,11 @@ def make_code() -> str:
         if code not in rooms:
             return code
 
-async def handler(ws: WebSocketServerProtocol):
+async def handler(ws):
     code = None
-    role = None  # "host" or "guest"
+    role = None
 
     try:
-        # First message must be {"action": "host"} or {"action": "join", "code": "XXXX"}
         raw = await asyncio.wait_for(ws.recv(), timeout=15)
         msg = json.loads(raw)
 
@@ -55,28 +54,26 @@ async def handler(ws: WebSocketServerProtocol):
             await ws.send(json.dumps({"type": "error", "msg": "Send host or join first"}))
             return
 
-        # Relay loop — forward every message to the other player
+        # Relay loop
         async for raw in ws:
             if code not in rooms:
                 break
             peers = rooms[code]
             other = next((p for p in peers if p is not ws), None)
-            if other and other.open:
+            if other and not other.is_closing():
                 await other.send(raw)
 
     except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed, json.JSONDecodeError):
         pass
     finally:
-        # Clean up room
         if code and code in rooms:
             rooms[code] = [p for p in rooms[code] if p is not ws]
             if not rooms[code]:
                 del rooms[code]
                 print(f"[-] Room {code} closed")
             else:
-                # Notify remaining player
                 remaining = rooms[code][0]
-                if remaining.open:
+                if not remaining.is_closing():
                     await remaining.send(json.dumps({"type": "opponent_left"}))
                     print(f"[-] Player left room {code}")
 
@@ -84,8 +81,8 @@ async def main():
     import os
     port = int(os.environ.get("PORT", 8765))
     print(f"Relay server listening on ws://0.0.0.0:{port}")
-    async with websockets.serve(handler, "0.0.0.0", port):
-        await asyncio.Future()  # run forever
+    async with serve(handler, "0.0.0.0", port):
+        await asyncio.Future()
 
 if __name__ == "__main__":
     asyncio.run(main())
